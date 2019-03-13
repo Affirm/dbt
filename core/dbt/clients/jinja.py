@@ -1,6 +1,7 @@
 import codecs
 import linecache
 import os
+import re
 
 import jinja2
 import jinja2._compat
@@ -281,3 +282,71 @@ def get_rendered(string, ctx, node=None,
 
 def undefined_error(msg):
     raise jinja2.exceptions.UndefinedError(msg)
+
+
+class BlockTag(object):
+    def __init__(self, block_type_name, block_name):
+        self.block_type_name = block_type_name
+        self.block_name = block_name
+        self.data = None
+        self.block_data = None
+
+    @property
+    def end_block_type_name(self):
+        return 'end{}'.format(self.block_type_name)
+
+    def end_pat(self):
+        # we don't want to use string formatting here because jinja uses most
+        # of the string formatting operators in its syntax...
+        pattern = ''.join((
+            r'(?P<rawdata>(.*?))',
+            r'((?:\s*\{\%\-|\{\%)\s*',
+            self.end_block_type_name,
+            r'\s*(?:\-\%\}|\%\}))'
+        ))
+        return re.compile(pattern, re.M | re.S)
+
+    def to_end(self, data):
+        match = self.end_pat().match(data)
+        if match is None:
+            msg = 'unexpected EOF, expected {}'.format(
+                self.end_block_type_name
+            )
+            logger.error(msg)
+            raise dbt.exceptions.raise_compiler_error(msg)
+
+        self.data = match.groupdict()['rawdata']
+        return data[match.end():]
+
+
+class BlockIterator(object):
+    def __init__(self, data):
+        self.data = data
+        self.current = data
+        self.blocks = []
+
+    def find_single_pattern(self):
+        start_remaining = len(self.current)
+        open_str = (
+            r'(.*?)(?:\s*\{\%\-|\{\%)\s*'
+            r'(?P<block_type_name>([A-Za-z_][A-Za-z_0-9]+))\s*'
+            r'(?P<block_name>([A-Za-z_][A-Za-z_0-9]+))\s*(?:\-\%\}\s*|\%\})'
+        )
+        open_pat = re.compile(open_str, re.M | re.S)
+        match = open_pat.match(self.current)
+        if match is None:
+            logger.debug('Found extra data: {}'.format(self.current))
+            return None
+        block_data = self.current[match.start():]
+        found = BlockTag(**match.groupdict())
+        self.current = found.to_end(self.current[match.end():])
+        found.block_data = block_data[:start_remaining - len(self.current)]
+        return found
+
+    def lex_for_blocks(self):
+        while self.current:
+            found = self.find_single_pattern()
+            if found is None:
+                break
+            self.blocks.append(found)
+        return self.blocks
