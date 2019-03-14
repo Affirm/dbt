@@ -119,6 +119,6 @@ class SQLParseResult(object):
         self.parsed[unique_id] = node
 
     def update(self, other):
-        self.disabled.extend(other)
+        self.disabled.extend(other.disabled)
         for unique_id, node in other.parsed.items():
             self.keep(unique_id, node)

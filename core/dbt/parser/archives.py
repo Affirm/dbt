@@ -1,4 +1,3 @@
-
 from dbt.contracts.graph.unparsed import UnparsedNode
 from dbt.node_types import NodeType
 from dbt.parser.base import MacrosKnownParser
@@ -89,7 +88,7 @@ class ArchiveBlockParser(BaseSqlParser):
         # (we hope!) `archive` blocks
         try:
             blocks = dbt.clients.jinja.extract_toplevel_blocks(
-                file_node.raw_sql
+                file_node['raw_sql']
             )
         except dbt.exceptions.CompilationException as exc:
             if exc.node is None:
@@ -100,16 +99,15 @@ class ArchiveBlockParser(BaseSqlParser):
                 continue
             name = block.block_name
             raw_sql = block.data
-            unique_id = '{}.{}.{}'.format(NodeType.Archive,
-                                          file_node.package_name, name)
-            fqn = self.get_fqn(file_node.path,
-                               self.all_projects[file_node.package_name])
-            yield file_node.incorporate(raw_sql=raw_sql, name=name,
-                                        unique_id=unique_id, fqn=fqn)
+            updates = {
+                'raw_sql': raw_sql,
+                'name': name,
+            }
+            yield dbt.utils.deep_merge(file_node, updates)
 
     @classmethod
     def get_compiled_path(cls, name, relative_path):
-        return os.path.join('analysis', relative_path)
+        return os.path.join('archives', relative_path)
 
     def parse_sql_nodes(self, nodes, tags=None):
         if tags is None:
