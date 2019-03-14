@@ -284,8 +284,11 @@ def undefined_error(msg):
     raise jinja2.exceptions.UndefinedError(msg)
 
 
+_COMMENT_START = r'(?:(?P<comment_start>(\s*\{\#)))'
+
+
 class BlockTag(object):
-    def __init__(self, block_type_name, block_name):
+    def __init__(self, block_type_name, block_name, **kw):
         self.block_type_name = block_type_name
         self.block_name = block_name
         self.data = None
@@ -302,21 +305,13 @@ class BlockTag(object):
             r'(?P<rawdata>(.*?))',
             r'((?:\s*\{\%\-|\{\%)\s*',
             self.end_block_type_name,
-            r'\s*(?:\-\%\}|\%\}))'
+            r'\s*(?:\-\%\}\s*|\%\}))'
         ))
         return re.compile(pattern, re.M | re.S)
 
-    def to_end(self, data):
-        match = self.end_pat().match(data)
-        if match is None:
-            msg = 'unexpected EOF, expected {}'.format(
-                self.end_block_type_name
-            )
-            logger.error(msg)
-            raise dbt.exceptions.raise_compiler_error(msg)
 
-        self.data = match.groupdict()['rawdata']
-        return data[match.end():]
+def regex(pat):
+    return re.compile(pat, re.DOTALL | re.MULTILINE)
 
 
 class BlockIterator(object):
@@ -324,29 +319,108 @@ class BlockIterator(object):
         self.data = data
         self.current = data
         self.blocks = []
+        self._current_block = None
+
+    def advance(self, num):
+        assert len(self.current) >= num
+        self.current, blk = self.current[num:], self.current[:num]
+        if self._current_block is not None:
+            self._current_block += blk
+
+    def expect_comment_end(self):
+        """Expect a comment end and return the match object. Does not mark the
+        comment end as consumed.
+        """
+        comment_end_pat = regex(r'(.*?)(\s*\#\})')
+        match = comment_end_pat.match(self.current)
+        if match is None:
+            msg = 'unexpected EOF, expected #}'
+            logger.error(msg)
+            dbt.exceptions.raise_compiler_error(msg)
+        self.advance(match.end())
+
+    def _first_match(self, *patterns):
+        matches = []
+        for pattern in patterns:
+            match = pattern.search(self.current)
+            if match:
+                matches.append(match)
+        if not matches:
+            return None
+        return min(matches, key=lambda m: m.end())
+
+    def _expect_match(self, expected_name, *patterns):
+        match = self._first_match(*patterns)
+        if match is None:
+            msg = 'unexpected EOF, expected {}, got "{}"'.format(
+                    expected_name, self.current
+                )
+            logger.error(msg)
+            dbt.exceptions.raise_compiler_error(msg)
+        return match
+
+    def handle_block(self, match, block_data):
+        # we have to handle comments inside blocks because you could do this:
+        # {% blk foo %}asdf {# {% endblk %} #} {%endblk%}
+        # they still end up in the data/raw_data of the block itself, but we
+        # have to know to ignore stuff until the end comment marker!
+        # nested comments can be ignored, I think
+        found = BlockTag(**match.groupdict())
+        end_pat = found.end_pat()
+        comment_pat = regex(_COMMENT_START)
+
+        open_len = match.end() - match.start()
+
+        self._current_block = ''
+
+        try:
+            # you can have as many comments in your block as you'd like!
+            while True:
+                match = self._expect_match(
+                    '"{}"'.format(found.end_block_type_name),
+                    end_pat, comment_pat
+                )
+                if match.groupdict().get('comment_start') is None:
+                    break
+
+                self.advance(match.end())
+                self.expect_comment_end()
+
+            found.data = self._current_block + match.groupdict()['rawdata']
+            self.advance(match.end())
+            found.block_data = block_data[:open_len + len(self._current_block)]
+            return found
+        finally:
+            self._current_block = None
 
     def find_single_pattern(self):
-        start_remaining = len(self.current)
         open_str = (
-            r'(.*?)(?:\s*\{\%\-|\{\%)\s*'
-            r'(?P<block_type_name>([A-Za-z_][A-Za-z_0-9]+))\s*'
-            r'(?P<block_name>([A-Za-z_][A-Za-z_0-9]+))\s*(?:\-\%\}\s*|\%\})'
+            r'(?:\s*\{\%\-|\{\%)\s*'
+            r'(?P<block_type_name>([A-Za-z_][A-Za-z_0-9]*))\s+'
+            r'(?P<block_name>([A-Za-z_][A-Za-z_0-9]*))\s*(?:\-\%\}\s*|\%\})'
         )
-        open_pat = re.compile(open_str, re.M | re.S)
-        match = open_pat.match(self.current)
+        match = self._first_match(regex(open_str), regex(_COMMENT_START))
         if match is None:
-            logger.debug('Found extra data: {}'.format(self.current))
-            return None
+            return False
+
         block_data = self.current[match.start():]
-        found = BlockTag(**match.groupdict())
-        self.current = found.to_end(self.current[match.end():])
-        found.block_data = block_data[:start_remaining - len(self.current)]
-        return found
+        self.advance(match.end())
+
+        if match.groupdict().get('comment_start') is not None:
+            self.expect_comment_end()
+        else:
+            block = self.handle_block(match, block_data)
+            if block is not None:
+                self.blocks.append(block)
+        return True
 
     def lex_for_blocks(self):
         while self.current:
             found = self.find_single_pattern()
-            if found is None:
+            if not found:
                 break
-            self.blocks.append(found)
         return self.blocks
+
+
+def extract_toplevel_blocks(data):
+    return BlockIterator(data).lex_for_blocks()
