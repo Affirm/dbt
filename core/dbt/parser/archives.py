@@ -2,6 +2,11 @@
 from dbt.contracts.graph.unparsed import UnparsedNode
 from dbt.node_types import NodeType
 from dbt.parser.base import MacrosKnownParser
+from dbt.parser.base_sql import BaseSqlParser, SQLParseResult
+
+import dbt.clients.jinja
+import dbt.exceptions
+import dbt.utils
 
 import os
 
@@ -76,3 +81,49 @@ class ArchiveParser(MacrosKnownParser):
                 archive_config=archive_config)
 
         return to_return
+
+
+class ArchiveBlockParser(BaseSqlParser):
+    def parse_archives_from_file(self, file_node, tags=None):
+        # the file node has a 'raw_sql' field that contains the jinja data with
+        # (we hope!) `archive` blocks
+        try:
+            blocks = dbt.clients.jinja.extract_toplevel_blocks(
+                file_node.raw_sql
+            )
+        except dbt.exceptions.CompilationException as exc:
+            if exc.node is None:
+                exc.node = file_node
+            raise
+        for block in blocks:
+            if block.block_type_name != NodeType.Archive:
+                continue
+            name = block.block_name
+            raw_sql = block.data
+            unique_id = '{}.{}.{}'.format(NodeType.Archive,
+                                          file_node.package_name, name)
+            fqn = self.get_fqn(file_node.path,
+                               self.all_projects[file_node.package_name])
+            yield file_node.incorporate(raw_sql=raw_sql, name=name,
+                                        unique_id=unique_id, fqn=fqn)
+
+    @classmethod
+    def get_compiled_path(cls, name, relative_path):
+        return os.path.join('analysis', relative_path)
+
+    def parse_sql_nodes(self, nodes, tags=None):
+        if tags is None:
+            tags = []
+
+        results = SQLParseResult()
+
+        # in archives, we have stuff in blocks.
+        for file_node in nodes:
+            archive_nodes = list(
+                self.parse_archives_from_file(file_node, tags=tags)
+            )
+            found = super(ArchiveBlockParser, self).parse_sql_nodes(
+                nodes=archive_nodes, tags=tags
+            )
+            results.update(found)
+        return results

@@ -287,6 +287,10 @@ def undefined_error(msg):
 _COMMENT_START = r'(?:(?P<comment_start>(\s*\{\#)))'
 
 
+def regex(pat):
+    return re.compile(pat, re.DOTALL | re.MULTILINE)
+
+
 class BlockTag(object):
     def __init__(self, block_type_name, block_name, **kw):
         self.block_type_name = block_type_name
@@ -307,11 +311,7 @@ class BlockTag(object):
             self.end_block_type_name,
             r'\s*(?:\-\%\}\s*|\%\}))'
         ))
-        return re.compile(pattern, re.M | re.S)
-
-
-def regex(pat):
-    return re.compile(pat, re.DOTALL | re.MULTILINE)
+        return regex(pattern)
 
 
 class BlockIterator(object):
